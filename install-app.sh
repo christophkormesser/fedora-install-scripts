@@ -6,71 +6,75 @@ mkdir -p "$(dirname "$METADATA")"
 [[ -f "$METADATA" ]] || echo "{}" > "$METADATA"
 
 # --- Dependencies Check ---
-# Added ImageMagick and xprop (for class detection)
-for dep in zenity tar sudo jq magick xprop; do
+for dep in zenity tar sudo jq magick xprop unzip; do
     if ! command -v "$dep" &>/dev/null; then
         notify-send "Installer Error" "$dep is required. Please install it."
-        echo "$dep is required. Install it first."
         exit 1
     fi
 done
 
 clean_name() {
     local name="$1"
-    # Remove common architecture/platform suffixes
     name=$(echo "$name" | sed -E 's/(-linux|-x64|-win64|-macos)//g')
-    # Remove version numbers (v1.2.3, -1.0, etc)
     name=$(echo "$name" | sed -E 's/[-_]?[0-9]+(\.[0-9]+)*$//')
-    # Capitalize first letter
     [[ ${name:0:1} =~ [a-zA-Z] ]] && name="${name^}"
     echo "$name"
 }
 
-# -------------------------------
-# File chooser
+# 1. File Selection
 TAR_FILE=$(zenity --file-selection \
     --title="Select application archive" \
     --filename="$HOME/Downloads/" \
-    --file-filter="Archives | *.tar.gz *.tgz *.tar.xz" || echo "")
+    --file-filter="Archives | *.tar.gz *.tgz *.tar.xz *.zip" || echo "")
 
 [[ -z "$TAR_FILE" ]] && exit 0
 
-case "$TAR_FILE" in
-    *.tar.gz|*.tgz) TAR_OPTS="xvzf" ;;
-    *.tar.xz)       TAR_OPTS="xvJf" ;;
-    *) notify-send "Installer" "Unsupported archive type." --expire-time=3000; exit 1 ;;
-esac
-
-# Progress bar for extraction
+# 2. Define TMP_DIR before using it (Fixes 'unbound variable')
 TMP_DIR=$(mktemp -d)
-trap "rm -rf $TMP_DIR" EXIT
+trap 'rm -rf "$TMP_DIR"' EXIT
 
+# 3. Extraction Logic
 (
     echo "10"; echo "# Extracting archive..."
-    tar "$TAR_OPTS" "$TAR_FILE" -C "$TMP_DIR"
+    case "$TAR_FILE" in
+        *.tar.gz|*.tgz) tar xvzf "$TAR_FILE" -C "$TMP_DIR" ;;
+        *.tar.xz)       tar xvJf "$TAR_FILE" -C "$TMP_DIR" ;;
+        *.zip)          unzip -q "$TAR_FILE" -d "$TMP_DIR" ;;
+        *) exit 1 ;;
+    esac
     echo "100"; echo "# Extraction complete"
-) | zenity --progress --title="Installing..." --auto-close --pulsate
+) | zenity --progress --title="Installing..." --auto-close --pulsate || exit 1
 
-EXTRACTED_DIR=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1)
-[[ -z "$EXTRACTED_DIR" ]] && notify-send "Installer" "No folder found in archive." && exit 1
+# -------------------------------
+# 4. REFINED: Directory Detection
+# -------------------------------
+# Count how many items are in the root of the archive
+ITEM_COUNT=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+# Check if there is exactly one directory and nothing else
+DIR_COUNT=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | wc -l)
 
-RAW_NAME=$(basename "$EXTRACTED_DIR")
+if [[ "$ITEM_COUNT" -eq 1 ]] && [[ "$DIR_COUNT" -eq 1 ]]; then
+    # Standard Case: The zip contains one single folder (e.g., winbox-v3/)
+    EXTRACTED_DIR=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d)
+    RAW_NAME=$(basename "$EXTRACTED_DIR")
+else
+    # "Flat" Case: Multiple files/folders (like your WinBox example)
+    # We use the ZIP name as the folder name
+    RAW_NAME=$(basename "$TAR_FILE" | sed -E 's/\.(tar\.gz|tgz|tar\.xz|zip)$//')
+    EXTRACTED_DIR="$TMP_DIR"
+fi
+
 APP_NAME=$(clean_name "$RAW_NAME")
 INSTALL_DIR="/opt/$RAW_NAME"
 
-# Confirm installation
-zenity --question --text="Install <b>$APP_NAME</b> into <b>$INSTALL_DIR</b>?" || exit 0
+# 5. Confirm and Move
+# Create the target directory first
+sudo mkdir -p "$INSTALL_DIR"
+# Move the contents of the extracted folder into /opt/name/
+sudo cp -rn "$EXTRACTED_DIR"/. "$INSTALL_DIR/"
 
-# Sudo operations
-# (Doing this early prevents sudo timeout during UI selection)
-if [ -d "$INSTALL_DIR" ]; then
-    if zenity --question --text="Directory $INSTALL_DIR exists. Overwrite?"; then
-        sudo rm -rf "$INSTALL_DIR"
-    else
-        exit 0
-    fi
-fi
 sudo mv "$EXTRACTED_DIR" "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 
 # -------------------------------
 # IMPROVED: Executable Selection using Arrays
